@@ -1,0 +1,293 @@
+# baselineTeam.py
+# ---------------
+# Licensing Information: Please do not distribute or publish solutions to this
+# project. You are free to use and extend these projects for educational
+# purposes. The Pacman AI projects were developed at UC Berkeley, primarily by
+# John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
+# For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
+
+from captureAgents import CaptureAgent
+import distanceCalculator
+import random, time, util
+from game import Directions
+import game
+from pacman import GameState
+from util import nearestPoint
+from operator import itemgetter
+
+
+#################
+# Team creation #
+#################
+
+def createTeam(firstIndex, secondIndex, isRed,
+               first='OffensiveAgent', second='OffensiveAgent'):
+    """
+    This function should return a list of two agents that will form the
+    team, initialized using firstIndex and secondIndex as their agent
+    index numbers.  isRed is True if the red team is being created, and
+    will be False if the blue team is being created.
+
+    As a potentially helpful development aid, this function can take
+    additional string-valued keyword arguments ("first" and "second" are
+    such arguments in the case of this function), which will come from
+    the --redOpts and --blueOpts command-line arguments to capture.py.
+    For the nightly contest, however, your team will be created without
+    any extra arguments, so you should make sure that the default
+    behavior is what you want for the nightly contest.
+    """
+    return [eval(first)(firstIndex), eval(second)(secondIndex)]
+
+
+##########
+# Agents #
+##########
+
+class ReflexCaptureAgent(CaptureAgent):
+    """
+    A base class for reflex agents that chooses score-maximizing actions
+    """
+
+    def chooseAction(self, gameState):
+        """
+        Picks among the actions with the highest Q(s,a).
+        """
+        actions = gameState.getLegalActions(self.index)
+
+        # You can profile your evaluation time by uncommenting these lines
+        # start = time.time()
+        values = [self.evaluate(gameState, a) for a in actions]
+        # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
+
+        maxValue = max(values)
+        bestActions = [a for a, v in zip(actions, values) if v == maxValue]
+
+        # print( (actions, values) )
+        # print( (maxValue, bestActions) )
+
+        return random.choice(bestActions)
+
+    def getSuccessor(self, gameState, action):
+        """
+        Finds the next successor which is a grid position (location tuple).
+        """
+        successor = gameState.generateSuccessor(self.index, action)
+        pos = successor.getAgentState(self.index).getPosition()
+        if pos != nearestPoint(pos):
+            # Only half a grid position was covered
+            return successor.generateSuccessor(self.index, action)
+        else:
+            return successor
+
+    def evaluate(self, gameState, action):
+        """
+        Computes a linear combination of features and feature weights
+        """
+        features = self.getFeatures(gameState, action)
+        weights = self.getWeights(gameState, action)
+        return features * weights
+
+    def getFeatures(self, gameState, action):
+        """
+        Returns a counter of features for the state
+        """
+        features = util.Counter()
+        successor = self.getSuccessor(gameState, action)
+        features['successorScore'] = self.getScore(successor)
+        return features
+
+    def getWeights(self, gameState, action):
+        """
+        Normally, weights do not depend on the gamestate.  They can be either
+        a counter or a dictionary.
+        """
+        return {'successorScore': 1.0}
+
+
+class MyCaptureAgent(ReflexCaptureAgent):
+    """
+      This class is an adaptation of alpha-beta agent from proj 2
+    """
+    def getGhosts(self, gameState):
+        enemy_indices = self.getOpponents(gameState)
+        enemies = [gameState.getAgentState(i) for i in enemy_indices]
+        ghost_indices = [
+            enemy_indices[i]
+            for i in range(len(enemy_indices))
+            if not enemies[i].isPacman
+            ]
+        return ghost_indices
+
+    def getInvaders(self, gameState):
+        enemy_indices = self.getOpponents(gameState)
+        enemies = [gameState.getAgentState(i) for i in enemy_indices]
+        invader_indices = [i for i in enemy_indices if enemies[i].isPacman]
+        return invader_indices
+
+class OffensiveAgent(MyCaptureAgent):
+
+    def getFeatures(self, currentGameState, action):
+        """
+          This evaluation function is to be used by the offensive agent
+
+          DESCRIPTION: <write something here so we know what you did>
+          The final utility has a few components:
+          1. current score, to penalize waiting and wondering around doing nothing
+          2. closestFoodScore: rate highly the state that's closer to food
+          3. avoidGhostScore: rate lower if the state is closer to an unscared ghost
+          4. stepsToKillGhost: chase and kill the ghost that becomes scared after we get a capsule
+        """
+
+        successor = self.getSuccessor(currentGameState, action)
+        myState = successor.getAgentState(self.index)
+        pac_pos = myState.getPosition()
+        food = self.getFood(successor)
+        enemies = [successor.getAgentState(i) for i in self.getOpponents(successor)]
+        ghost_states = [a for a in enemies if not a.isPacman and a.getPosition() != None]
+
+        infinity = 9999999
+        chanceToKillGhost = 0
+        distanceToFood = 0
+        distanceToGhost = 0
+
+        closest_food_d = infinity
+        for p in food.asList():
+            if food[p[0]][p[1]]:
+                food_d = self.getMazeDistance(pac_pos, p)
+                if food_d < closest_food_d:
+                    closest_food_d = food_d
+        if closest_food_d < infinity:
+            distanceToFood = closest_food_d
+
+        # maze_max_d = currentGameState.data.layout.width + currentGameState.data.layout.height - 2
+        # cap_d = 0
+        # closest_cap_d = infinity
+        # caps = currentGameState.getCapsules()
+        # if len(caps) > 0:
+        #     for p in caps:
+        #         cap_d = util.manhattanDistance(pac_pos, p)
+        #         if cap_d < closest_cap_d:
+        #             closest_cap_d = cap_d
+        # if closest_cap_d < infinity:
+        #     # closestCapScore = 1.0 / (closest_cap_d + 1)
+        #     closestCapScore = maze_max_d - closest_cap_d
+
+        min_d = infinity
+        closest_g = 0
+        ghost_tuples = []
+        for g in ghost_states:
+            d = self.getMazeDistance(g.getPosition(), pac_pos)
+            ghost_tuples.append((g, d))
+            if g.scaredTimer == 0 and d < min_d:
+                min_d = d
+        sorted(ghost_tuples, key=itemgetter(1))
+
+        # find the closest eatable ghost, chase and eat it!
+        for t in ghost_tuples:
+            g = t[0]
+            d = t[1]
+            if d < g.scaredTimer and g.scaredTimer - d > chanceToKillGhost:
+                chanceToKillGhost = g.scaredTimer - d
+
+        # else, no ghost is eatable, avoid the closest ghost.
+        if min_d < infinity:
+            distanceToGhost = min_d
+
+        # use this for q5
+        score = 100*self.getScore(successor) + -1*distanceToFood + 0*distanceToGhost
+        # use this for contest
+        #score = currentGameState.getScore() + 1*closestFoodScore + 2*avoidGhostScore + 3*stepsToKillGhost
+        # print ((score, distanceToFood))
+
+        features = util.Counter()
+        features["successorScore"] = self.getScore(successor)
+        features["distanceToFood"] = distanceToFood
+        features["distanceToGhost"] = distanceToGhost
+        features["chanceToKillGhost"] = chanceToKillGhost
+
+        return features
+
+    def getWeights(self, gameState, action):
+        weights = util.Counter()
+        weights["successorScore"] = 100.0
+        weights["distanceToFood"] = -1.0
+        weights["distanceToGhost"] = 1.0
+        weights["chanceToKillGhost"] = 0.8
+
+        return weights
+
+class DefensiveAgent(MyCaptureAgent):
+
+    def evaluate(self, currentGameState, action):
+        """
+          This evaluation function is to be used by the DEFENSIVE agent
+
+          DESCRIPTION: <write something here so we know what you did>
+          The final utility has a few components:
+          1. current score, to penalize waiting and wondering around doing nothing
+          2. closestFoodScore: rate highly the state that's closer to food
+          3. avoidGhostScore: rate lower if the state is closer to an unscared ghost
+          4. stepsToKillGhost: chase and kill the ghost that becomes scared after we get a capsule
+        """
+
+        successor = self.getSuccessor(currentGameState, action)
+        myState = successor.getAgentState(self.index)
+        pac_pos = myState.getPosition()
+        food = self.getFood(successor)
+        enemies = [successor.getAgentState(i) for i in self.getOpponents(successor)]
+        ghost_states = [a for a in enemies if not a.isPacman and a.getPosition() != None]
+
+        infinity = 9999999
+        stepsToKillGhost = 0
+        closestFoodScore = 0
+        avoidGhostScore = 0
+
+        closest_food_d = infinity
+        for p in food.asList():
+            if food[p[0]][p[1]]:
+                food_d = self.getMazeDistance(pac_pos, p)
+                if food_d < closest_food_d:
+                    closest_food_d = food_d
+        if closest_food_d < infinity:
+            closestFoodScore = 1.0 / (closest_food_d + 1)
+
+        # maze_max_d = currentGameState.data.layout.width + currentGameState.data.layout.height - 2
+        # cap_d = 0
+        # closest_cap_d = infinity
+        # caps = currentGameState.getCapsules()
+        # if len(caps) > 0:
+        #     for p in caps:
+        #         cap_d = util.manhattanDistance(pac_pos, p)
+        #         if cap_d < closest_cap_d:
+        #             closest_cap_d = cap_d
+        # if closest_cap_d < infinity:
+        #     # closestCapScore = 1.0 / (closest_cap_d + 1)
+        #     closestCapScore = maze_max_d - closest_cap_d
+
+        min_d = infinity
+        closest_g = 0
+        ghost_tuples = []
+        for g in ghost_states:
+            d = self.getMazeDistance(g.getPosition(), pac_pos)
+            ghost_tuples.append((g, d))
+            if g.scaredTimer == 0 and d < min_d:
+                min_d = d
+        sorted(ghost_tuples, key=itemgetter(1))
+
+        # find the closest eatable ghost, chase and eat it!
+        for t in ghost_tuples:
+            g = t[0]
+            d = t[1]
+            if d < g.scaredTimer:
+                stepsToKillGhost = g.scaredTimer - d
+
+        # else, no ghost is eatable, avoid the closest ghost.
+        if min_d < infinity:
+            avoidGhostScore = 1.0 - 1.0 / (min_d+1.0)
+
+        # use this for q5
+        score = self.getScore(currentGameState) + 2*closestFoodScore + 2*avoidGhostScore + 2*stepsToKillGhost
+        # use this for contest
+        #score = currentGameState.getScore() + 1*closestFoodScore + 2*avoidGhostScore + 3*stepsToKillGhost
+        # print ((score, closestFoodScore))
+        return score
